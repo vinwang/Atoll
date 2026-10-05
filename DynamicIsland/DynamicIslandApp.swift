@@ -113,7 +113,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let dndManager = DoNotDisturbManager.shared  // NEW: DND detection
     let bluetoothAudioManager = BluetoothAudioManager.shared  // NEW: Bluetooth audio detection
     let networkConnectivityManager = NetworkConnectivityManager.shared
-    let idleAnimationManager = IdleAnimationManager.shared  // NEW: Custom idle animations
     let downloadManager = DownloadManager.shared  // NEW: browser downloads detection
     let lockScreenPanelManager = LockScreenPanelManager.shared  // NEW: Lock screen music panel
     let mediaControlsStateCoordinator = MediaControlsStateCoordinator.shared
@@ -279,6 +278,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        MenuBarHiddenSection.shared.restoreAll()
+        if NotchSpaceManager.isInitialized {
+            NotchSpaceManager.shared.notchSpace.close()
+        }
         let userInfo: [String: Any] = [
             AtollDistributedNotifications.UserInfoKey.sourcePID: NSNumber(value: ProcessInfo.processInfo.processIdentifier)
         ]
@@ -354,6 +357,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func cleanupWindows(shouldInvert: Bool = false) {
+        Logger.log(
+            "[Window] cleanup shouldInvert=\(shouldInvert) allDisplays=\(Defaults[.showOnAllDisplays]) singleWindow=\(window != nil) displayWindows=\(windows.count)",
+            category: .debug
+        )
         if shouldInvert ? !Defaults[.showOnAllDisplays] : Defaults[.showOnAllDisplays] {
             for (screen, window) in windows {
                 // Tear down the hosted ContentView before dropping the window
@@ -413,10 +420,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let requiredSize = adjustedSizeForScreen(baseSize, screen: screen)
         let roundedWidth = requiredSize.width.rounded()
         let roundedHeight = requiredSize.height.rounded()
+        let topBleed = notchTopScreenBleed(for: screen.localizedName)
+        let initialFrame = NSRect(
+            x: (screen.frame.midX - roundedWidth / 2).rounded(),
+            y: (screen.frame.maxY + topBleed - roundedHeight).rounded(),
+            width: roundedWidth,
+            height: roundedHeight
+        )
         
         let window = DynamicIslandWindow(
-            contentRect: NSRect(
-                x: 0, y: 0, width: roundedWidth, height: roundedHeight),
+            contentRect: initialFrame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -452,12 +465,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let newX = (centerX - (roundedWidth / 2)).rounded()
         let newY = (screenFrame.maxY + topBleed - roundedHeight).rounded()
 
-        window.setFrame(NSRect(
+        let targetFrame = NSRect(
             x: newX,
             y: newY,
             width: roundedWidth,
             height: roundedHeight
-        ), display: false)
+        )
+        if window.frame != targetFrame {
+            Logger.log(
+                "[Window] reposition screen=\(screen.localizedName) from=\(window.frame) to=\(targetFrame)",
+                category: .debug
+            )
+            window.setFrame(targetFrame, display: false)
+        }
         
         if changeAlpha {
             window.alphaValue = 1
@@ -683,6 +703,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // considered, but an unchanged frame still needs no AppKit display
         // transaction. Avoiding that no-op matters during hover/click opens.
         guard window.frame != targetFrame else { return }
+        Logger.log(
+            "[Window] resize screen=\(screen.localizedName) from=\(window.frame) to=\(targetFrame) animated=\(animated)",
+            category: .debug
+        )
         window.setFrame(targetFrame, display: true)
     }
 
@@ -694,6 +718,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MainThreadStallMonitor.shared.start()
+        Logger.log(
+            "[Diagnostics] Launch screens: \(NSScreen.screens.map { "\($0.localizedName)=\($0.frame)" }.joined(separator: ", ")); preferred=\(coordinator.preferredScreen)",
+            category: .lifecycle
+        )
         let userInfo: [String: Any] = [
             AtollDistributedNotifications.UserInfoKey.sourcePID: NSNumber(value: ProcessInfo.processInfo.processIdentifier)
         ]
@@ -706,6 +735,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         LockScreenLiveActivityWindowManager.shared.configure(viewModel: vm)
         LockScreenManager.shared.configure(viewModel: vm)
+        MenuBarHiddenSection.shared.prepareForLaunch()
+        Defaults.publisher(.menuBarHideSelectedItems, options: [])
+            .receive(on: DispatchQueue.main)
+            .sink { _ in MenuBarHiddenSection.shared.configure() }
+            .store(in: &cancellables)
+        Defaults.publisher(.enableMenuBarDrawer).sink { change in
+            Task { @MainActor in
+                if change.newValue {
+                    MenuBarItemManager.shared.start()
+                } else {
+                    MenuBarItemManager.shared.stop()
+                }
+                MenuBarHiddenSection.shared.configure()
+            }
+        }.store(in: &cancellables)
         extensionXPCServiceHost.start()
         extensionRPCServer.start()
         
@@ -731,8 +775,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
         
-        // Initialize idle animations (load bundled + built-in face)
-        idleAnimationManager.initializeDefaultAnimations()
+        Defaults.publisher(.showNotHumanFace)
+            .receive(on: DispatchQueue.main)
+            .sink { change in
+                if change.newValue {
+                    IdleAnimationManager.shared.initializeDefaultAnimations()
+                }
+            }
+            .store(in: &cancellables)
 
         applySelectedAppIcon()
         installTopMenuItemsIfNeeded()
@@ -1080,15 +1130,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         registerOptionalShortcutHandlers()
         updateFeatureShortcutAvailability()
 
-        if !Defaults[.showOnAllDisplays] {
-            let viewModel = self.vm
-            let window = createDynamicIslandWindow(
-                for: NSScreen.main ?? NSScreen.screens.first!, with: viewModel)
-            self.window = window
-            adjustWindowPosition(changeAlpha: true)
-        } else {
-            adjustWindowPosition(changeAlpha: true)
-        }
+        // Let adjustWindowPosition choose the preferred display before the
+        // first window is created. Creating on NSScreen.main first makes the
+        // notch briefly appear on the wrong display during launch.
+        adjustWindowPosition(changeAlpha: true)
         
         // Skip onboarding window and welcome sound under UI testing.
         if coordinator.firstLaunch && !AppRuntimeEnvironment.isUITesting {
@@ -1568,6 +1613,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         previousScreens = currentScreens
         
         if screensChanged {
+            Logger.log(
+                "[Window] display configuration changed: \(currentScreens.map { "\($0.localizedName)=\($0.frame)" }.joined(separator: ", "))",
+                category: .lifecycle
+            )
             DispatchQueue.main.async { [weak self] in
                 self?.cleanupWindows()
                 self?.adjustWindowPosition()
@@ -1576,6 +1625,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func adjustWindowPosition(changeAlpha: Bool = false) {
+        Logger.log(
+            "[Window] adjust position allDisplays=\(Defaults[.showOnAllDisplays]) preferred=\(coordinator.preferredScreen) autoSwitch=\(Defaults[.automaticallySwitchDisplay]) screens=\(NSScreen.screens.map { $0.localizedName })",
+            category: .debug
+        )
         if Defaults[.showOnAllDisplays] {
             let currentScreens = Set(NSScreen.screens)
             

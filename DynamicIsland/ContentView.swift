@@ -1288,6 +1288,8 @@ struct ContentView: View {
                           switch coordinator.currentView {
                               case .home:
                                   NotchHomeView(albumArtNamespace: albumArtNamespace)
+                              case .menuBar:
+                                  MenuBarDrawerView()
                               case .shelf:
                                   NotchShelfView()
                               case .timer:
@@ -2447,12 +2449,17 @@ struct ContentView: View {
     }
     
     /// Track-level reservation. A sneak peek hides only the overlaid words.
+    ///
+    /// Eligibility follows the debounced idle signal rather than `isPlaying`:
+    /// anything that briefly takes the now-playing session — a web view opened
+    /// inside a chat app, for one — publishes a stopped state for a moment, and
+    /// with the raw flag the strip flashed in and out with it.
     private var pinnedLyricsVisible: Bool {
         PinnedLyricsView.shouldReserve(
             lyricsEnabled: enableLyrics,
             pinEnabled: pinLyricsWhenClosed,
             surfaceEligible: vm.notchState == .closed && !vm.hideOnClosed
-                && !lockScreenManager.isLocked && musicManager.isPlaying,
+                && !lockScreenManager.isLocked && !musicManager.isPlayerIdle,
             availability: musicManager.lyricsAvailability
         )
     }

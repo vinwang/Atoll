@@ -99,7 +99,7 @@ class DynamicIslandViewCoordinator: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var hoverOpenSuppressedUntil: Date = .distantPast
     
-    private static let tabOrder: [NotchViews] = [.home, .shelf, .timer, .stats, .llmUsage, .colorPicker, .notes, .clipboard, .terminal, .extensionExperience]
+    private static let tabOrder: [NotchViews] = [.home, .menuBar, .shelf, .timer, .stats, .llmUsage, .colorPicker, .notes, .clipboard, .terminal, .extensionExperience]
     
     /// Direction of the most recent tab switch (true = forward/right, false = backward/left)
     @Published var tabSwitchForward: Bool = true
@@ -230,6 +230,7 @@ class DynamicIslandViewCoordinator: ObservableObject {
             Defaults.publisher(.enableClipboardManager).map { _ in () }.eraseToAnyPublisher(),
             Defaults.publisher(.clipboardDisplayMode).map { _ in () }.eraseToAnyPublisher(),
             Defaults.publisher(.enableTerminalFeature).map { _ in () }.eraseToAnyPublisher(),
+            Defaults.publisher(.enableMenuBarDrawer).map { _ in () }.eraseToAnyPublisher(),
             Defaults.publisher(.enableMinimalisticUI).map { _ in () }.eraseToAnyPublisher()
         )
         .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
@@ -240,6 +241,14 @@ class DynamicIslandViewCoordinator: ObservableObject {
 
         // Enforce minimum width on launch for existing configurations
         enforceMinimumNotchWidth()
+
+        Defaults.publisher(.enableMenuBarDrawer)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                guard !change.newValue, self?.currentView == .menuBar else { return }
+                self?.currentView = .home
+            }
+            .store(in: &cancellables)
     }
 
     var isHoverOpenSuppressed: Bool {
@@ -357,6 +366,7 @@ class DynamicIslandViewCoordinator: ObservableObject {
             return
         }
         DispatchQueue.main.async {
+            let previous = self.sneakPeek
             // Single write so `sneakPeek.didSet` (which schedules the auto-hide)
             // fires once, not once per field — the per-field writes raced the hide
             // Task and could wedge `show == true` with no pending hide.
@@ -370,6 +380,16 @@ class DynamicIslandViewCoordinator: ObservableObject {
             updated.accentColor = accentColor
             updated.styleOverride = styleOverride
             updated.targetScreenName = targetScreen?.localizedName
+            if previous.show != updated.show || previous.type != updated.type
+                || previous.title != updated.title || previous.subtitle != updated.subtitle {
+                Logger.log(
+                    "[SneakPeek] \(previous.show ? "shown" : "hidden") -> \(updated.show ? "shown" : "hidden") "
+                        + "type=\(String(describing: updated.type)) duration=\(resolvedDuration)s "
+                        + "metadata=\(!updated.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)/\(!updated.subtitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) "
+                        + "screen=\(updated.targetScreenName ?? "auto")",
+                    category: .debug
+                )
+            }
             withAnimation(.smooth(duration: 0.3)) {
                 self.sneakPeek = updated
             }

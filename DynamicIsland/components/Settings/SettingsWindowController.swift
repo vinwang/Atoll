@@ -29,6 +29,10 @@ class SettingsWindowController: NSWindowController {
     private var updaterController: SPUStandardUpdaterController?
     
     private init() {
+        super.init(window: nil)
+    }
+
+    override func loadWindow() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 700, height: 600),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -36,8 +40,7 @@ class SettingsWindowController: NSWindowController {
             defer: false
         )
         
-        super.init(window: window)
-        
+        self.window = window
         setupWindow()
     }
     
@@ -47,8 +50,9 @@ class SettingsWindowController: NSWindowController {
     
     func setUpdaterController(_ controller: SPUStandardUpdaterController) {
         self.updaterController = controller
-        // Recreate the content view with the proper updater controller
-        setupWindow()
+        if isWindowLoaded, window?.contentView != nil {
+            window?.contentView = NSHostingView(rootView: SettingsView(updaterController: controller))
+        }
     }
     
     private func setupWindow() {
@@ -85,7 +89,12 @@ class SettingsWindowController: NSWindowController {
     
     func showWindow() {
         // Ensure window exists
-        _ = window
+        if window == nil {
+            loadWindow()
+        }
+        if window?.contentView == nil {
+            window?.contentView = NSHostingView(rootView: SettingsView(updaterController: updaterController))
+        }
 
         // Reassert regular window semantics in case any prior state mutated this window.
         window?.level = .normal
@@ -135,6 +144,7 @@ class SettingsWindowController: NSWindowController {
 extension SettingsWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         relinquishFocus()
+        window?.contentView = nil
     }
     
     func windowShouldClose(_ sender: NSWindow) -> Bool {

@@ -72,6 +72,7 @@ public enum NotchState {
 
 public enum NotchViews {
     case home
+    case menuBar
     case shelf
     case timer
     case stats

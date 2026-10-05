@@ -23,6 +23,7 @@
 import AVFoundation
 import SwiftUI
 import Defaults
+import Combine
 
 class WebcamManager: NSObject, ObservableObject {
     static let shared = WebcamManager()
@@ -61,6 +62,7 @@ class WebcamManager: NSObject, ObservableObject {
     private let sessionQueue = DispatchQueue(label: "DynamicIsland.WebcamManager.SessionQueue", qos: .userInitiated)
     
     private var isCleaningUp: Bool = false
+    private var mirrorSubscription: AnyCancellable?
     
     // MARK: - Constants
     
@@ -85,9 +87,9 @@ class WebcamManager: NSObject, ObservableObject {
     
     private override init() {
         super.init()
-        NotificationCenter.default.addObserver(self, selector: #selector(deviceWasDisconnected), name: .AVCaptureDeviceWasDisconnected, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(deviceWasConnected), name: .AVCaptureDeviceWasConnected, object: nil)
-        checkCameraAvailability()
+        mirrorSubscription = Defaults.publisher(.showMirror)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateMirrorAvailability() }
     }
     
     deinit {
@@ -104,9 +106,24 @@ class WebcamManager: NSObject, ObservableObject {
     }
 
     // MARK: - Camera Management
+
+    private func updateMirrorAvailability() {
+        NotificationCenter.default.removeObserver(self, name: .AVCaptureDeviceWasDisconnected, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .AVCaptureDeviceWasConnected, object: nil)
+        guard Defaults[.showMirror] else {
+            availableCameras = []
+            cameraAvailable = false
+            stopSession()
+            return
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(deviceWasDisconnected), name: .AVCaptureDeviceWasDisconnected, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(deviceWasConnected), name: .AVCaptureDeviceWasConnected, object: nil)
+        checkCameraAvailability()
+    }
     
     /// Checks current authorization status and requests access if needed
     func checkAndRequestVideoAuthorization() {
+        guard Defaults[.showMirror] else { return }
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         DispatchQueue.main.async {
             self.authorizationStatus = status
@@ -138,6 +155,7 @@ class WebcamManager: NSObject, ObservableObject {
     
     /// Checks if any camera devices are available and sets up capture session if needed
     func checkCameraAvailability() {
+        guard Defaults[.showMirror] else { return }
         let availableDevices = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.external, .builtInWideAngleCamera, .deskViewCamera, .externalUnknown],
             mediaType: .video,
@@ -147,6 +165,7 @@ class WebcamManager: NSObject, ObservableObject {
         let hasAvailableDevices = !availableDevices.isEmpty
         
         DispatchQueue.main.async {
+            guard Defaults[.showMirror] else { return }
             self.availableCameras = availableDevices
             self.cameraAvailable = hasAvailableDevices
         }
@@ -155,7 +174,7 @@ class WebcamManager: NSObject, ObservableObject {
     /// Sets up the capture session with a completion handler
     private func setupCaptureSession(completion: @escaping (Bool) -> Void) {
         sessionQueue.async { [weak self] in
-            guard let self = self else { 
+            guard let self = self, Defaults[.showMirror] else {
                 completion(false)
                 return 
             }
@@ -219,6 +238,11 @@ class WebcamManager: NSObject, ObservableObject {
                 
                 // Create and set up preview layer on main thread
                 DispatchQueue.main.async {
+                    guard Defaults[.showMirror] else {
+                        self.stopSession()
+                        completion(false)
+                        return
+                    }
                     self.cameraAvailable = true
                     let previewLayer = AVCaptureVideoPreviewLayer(session: session)
                     previewLayer.videoGravity = .resizeAspectFill
@@ -298,7 +322,7 @@ class WebcamManager: NSObject, ObservableObject {
     
     func startSession() {
         sessionQueue.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, Defaults[.showMirror] else { return }
             
             // If no session exists, create new session
             if self.captureSession == nil {
@@ -317,7 +341,7 @@ class WebcamManager: NSObject, ObservableObject {
     
     private func startRunningCaptureSession() {
         sessionQueue.async { [weak self] in
-            guard let self = self, let session = self.captureSession, !session.isRunning else {
+            guard let self = self, Defaults[.showMirror], let session = self.captureSession, !session.isRunning else {
                 return
             }
             

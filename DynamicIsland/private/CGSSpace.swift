@@ -26,9 +26,11 @@ import AppKit
 public final class CGSSpace {
     private let identifier: CGSSpaceID
     private let createdByInit: Bool
+    private var isClosed = false
 
     public var windows: Set<NSWindow> = [] {
         didSet {
+            guard !isClosed else { return }
             let remove = oldValue.subtracting(self.windows)
             let add = self.windows.subtracting(oldValue)
 
@@ -41,7 +43,7 @@ public final class CGSSpace {
         }
     }
 
-    /// Initialized `CGSSpace`s *MUST* be de-initialized upon app exit!
+    /// Owned Spaces must be closed explicitly before app exit.
     public init(level: Int = 0) {
         let flag = 0x1 // this value MUST be 1, otherwise, Finder decides to draw desktop icons
         self.identifier = CGSSpaceCreate(_CGSDefaultConnection(), flag, nil)
@@ -57,12 +59,19 @@ public final class CGSSpace {
         self.createdByInit = false // Mark as created externally
     }
 
-    deinit {
+    public func close() {
+        guard !isClosed else { return }
+        windows.removeAll()
+        isClosed = true
         CGSHideSpaces(_CGSDefaultConnection(), [self.identifier])
         // Only call CGSSpaceDestroy if the space was created by the first init
         if createdByInit {
             CGSSpaceDestroy(_CGSDefaultConnection(), self.identifier)
         }
+    }
+
+    deinit {
+        close()
     }
 }
 

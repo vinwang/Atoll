@@ -69,9 +69,13 @@ struct Logger {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+    private static let dateFormatterLock = NSLock()
     private static var osLoggerCache: [LogCategory: OSLog] = [:]
+    private static let cacheLock = NSLock()
 
     private static func osLogger(for category: LogCategory) -> OSLog {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
         if let cached = osLoggerCache[category] {
             return cached
         }
@@ -93,7 +97,9 @@ struct Logger {
         }
 
         let fileName = (file as NSString).lastPathComponent
+        dateFormatterLock.lock()
         let timestamp = dateFormatter.string(from: Date())
+        dateFormatterLock.unlock()
         let entry = "\(category.rawValue) [\(timestamp)] [\(fileName):\(line)] \(function) - \(message)"
         let logger = osLogger(for: category)
         os_log("%{public}@", log: logger, type: .default, entry)
@@ -128,6 +134,67 @@ struct Logger {
                 function: function,
                 line: line)
         }
+    }
+}
+
+/// Records when the main run loop stops servicing work. This is deliberately
+/// small: it helps distinguish an Atoll main-thread stall from a WindowServer
+/// or kernel freeze without adding a sampling thread or a new logging system.
+final class MainThreadStallMonitor {
+    static let shared = MainThreadStallMonitor()
+
+    private let lock = NSLock()
+    private var lastHeartbeat = DispatchTime.now().uptimeNanoseconds
+    private var hasReportedStall = false
+    private var started = false
+    private var checkTimer: DispatchSourceTimer?
+
+    private init() {}
+
+    func start() {
+        lock.lock()
+        guard !started else {
+            lock.unlock()
+            return
+        }
+        started = true
+        lock.unlock()
+
+        scheduleHeartbeat()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(500))
+        timer.setEventHandler { [weak self] in self?.checkHeartbeat() }
+        checkTimer = timer
+        timer.resume()
+    }
+
+    private func scheduleHeartbeat() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            self.lastHeartbeat = DispatchTime.now().uptimeNanoseconds
+            let recovered = self.hasReportedStall
+            self.hasReportedStall = false
+            self.lock.unlock()
+            if recovered {
+                Logger.log("[Diagnostics] Main thread responsive again", category: .performance)
+            }
+            self.scheduleHeartbeat()
+        }
+    }
+
+    private func checkHeartbeat() {
+        lock.lock()
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- lastHeartbeat
+        let shouldReport = elapsed >= 1_000_000_000 && !hasReportedStall
+        if shouldReport { hasReportedStall = true }
+        lock.unlock()
+
+        guard shouldReport else { return }
+        Logger.log(
+            String(format: "[Diagnostics] Main thread stalled for %.2fs", Double(elapsed) / 1_000_000_000),
+            category: .warning
+        )
     }
 }
 
@@ -170,4 +237,4 @@ public func NSLog(_ format: String, _ args: CVarArg...) {
     if simulatedLevel.rawValue > configuredLevel.rawValue { return }
     
     Foundation.NSLog("%@", message)
-} 
+}

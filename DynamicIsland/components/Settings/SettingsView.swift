@@ -59,6 +59,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case battery
     case stats
     case clipboard
+    case menuBar
     case screenAssistant
     case colorPicker
     case downloads
@@ -77,7 +78,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .media, .liveActivities, .lockScreen, .devices:                 return .mediaAndDisplay
         case .hudAndOSD, .battery:                                           return .system
         case .timer, .calendar, .notes:                                      return .productivity
-        case .clipboard, .screenAssistant, .colorPicker, .shelf,
+        case .clipboard, .menuBar, .screenAssistant, .colorPicker, .shelf,
              .downloads, .shortcuts:                                         return .utilities
         case .stats, .terminal:                                              return .developer
         case .extensions:                                                    return .integrations
@@ -100,6 +101,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .battery: return String(localized: "Battery")
         case .stats: return String(localized: "Stats")
         case .clipboard: return String(localized: "Clipboard")
+        case .menuBar: return String(localized: "Menu Bar")
         case .screenAssistant: return String(localized: "Screen Assistant")
         case .colorPicker: return String(localized: "Color Picker")
         case .downloads: return String(localized: "Downloads")
@@ -126,6 +128,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .battery: return "battery.100.bolt"
         case .stats: return "chart.xyaxis.line"
         case .clipboard: return "clipboard"
+        case .menuBar: return "menubar.rectangle"
         case .screenAssistant: return "brain.head.profile"
         case .colorPicker: return "eyedropper"
         case .downloads: return "square.and.arrow.down"
@@ -152,6 +155,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .battery: return Color(red: 0.202, green: 0.783, blue: 0.348, opacity: 1.000)
         case .stats: return .teal
         case .clipboard: return .mint
+        case .menuBar: return .blue
         case .screenAssistant: return .pink
         case .colorPicker: return .accentColor
         case .downloads: return .gray
@@ -227,6 +231,7 @@ private enum SettingsSearchIndex {
         SettingsSearchEntry(tab: .general, title: "Launch at login", keywords: ["autostart", "startup"], highlightID: SettingsTab.general.highlightID(for: "Launch at login")),
         SettingsSearchEntry(tab: .general, title: "Show on all displays", keywords: ["multi-display", "external monitor"], highlightID: SettingsTab.general.highlightID(for: "Show on all displays")),
         SettingsSearchEntry(tab: .general, title: "Show on a specific display", keywords: ["preferred screen", "display picker"], highlightID: SettingsTab.general.highlightID(for: "Show on a specific display")),
+        SettingsSearchEntry(tab: .general, title: "Logging Level", keywords: ["logs", "debug", "diagnostics"], highlightID: SettingsTab.general.highlightID(for: "Logging Level")),
         SettingsSearchEntry(tab: .general, title: "Automatically switch displays", keywords: ["auto switch", "displays"], highlightID: SettingsTab.general.highlightID(for: "Automatically switch displays")),
         SettingsSearchEntry(tab: .general, title: "Hide Dynamic Island during screenshots & recordings", keywords: ["privacy", "screenshot", "recording"], highlightID: SettingsTab.general.highlightID(for: "Hide Dynamic Island during screenshots & recordings")),
         SettingsSearchEntry(tab: .general, title: "Enable Keep Awake", keywords: ["caffeinate", "keep awake", "prevent sleep", "insomnia", "no sleep"], highlightID: SettingsTab.general.highlightID(for: "Enable Keep Awake")),
@@ -456,6 +461,11 @@ private enum SettingsSearchIndex {
         SettingsSearchEntry(tab: .clipboard, title: "Display Mode", keywords: ["list", "grid", "clipboard"], highlightID: SettingsTab.clipboard.highlightID(for: "Display Mode")),
         SettingsSearchEntry(tab: .clipboard, title: "History Size", keywords: ["history", "clipboard"], highlightID: SettingsTab.clipboard.highlightID(for: "History Size")),
 
+        // Menu Bar
+        SettingsSearchEntry(tab: .menuBar, title: "Enable Menu Bar Drawer", keywords: ["menu bar", "status items", "drawer"], highlightID: SettingsTab.menuBar.highlightID(for: "Enable Menu Bar Drawer")),
+        SettingsSearchEntry(tab: .menuBar, title: "Show tooltips", keywords: ["menu bar", "tooltip"], highlightID: nil),
+        SettingsSearchEntry(tab: .menuBar, title: "Show item names", keywords: ["menu bar", "labels", "names"], highlightID: nil),
+
         // Screen Assistant
         SettingsSearchEntry(tab: .screenAssistant, title: "Enable Screen Assistant", keywords: ["screen assistant", "ai"], highlightID: SettingsTab.screenAssistant.highlightID(for: "Enable Screen Assistant")),
         SettingsSearchEntry(tab: .screenAssistant, title: "Display Mode", keywords: ["screen assistant", "mode"], highlightID: SettingsTab.screenAssistant.highlightID(for: "Display Mode")),
@@ -606,7 +616,7 @@ private struct SettingsForm<Content: View>: View {
 }
 
 struct SettingsView: View {
-    @State private var selectedTab: SettingsTab = .general
+    @AppStorage("settingsSelectedTab") private var selectedTab: SettingsTab = .general
     @State private var searchText: String = ""
     @StateObject private var highlightCoordinator = SettingsHighlightCoordinator()
     @Default(.enableMinimalisticUI) var enableMinimalisticUI
@@ -812,6 +822,7 @@ struct SettingsView: View {
             .notes,
             // Utilities
             .clipboard,
+            .menuBar,
             .screenAssistant,
             .colorPicker,
             .shelf,
@@ -1012,7 +1023,7 @@ struct SettingsView: View {
 
     private func isTabVisible(_ tab: SettingsTab) -> Bool {
         switch tab {
-        case .timer, .stats, .clipboard, .screenAssistant, .colorPicker, .shelf, .notes, .terminal:
+        case .timer, .stats, .clipboard, .menuBar, .screenAssistant, .colorPicker, .shelf, .notes, .terminal:
             return !enableMinimalisticUI
         default:
             return true
@@ -1073,6 +1084,10 @@ struct SettingsView: View {
         case .clipboard:
             SettingsForm(tab: .clipboard) {
                 ClipboardSettings()
+            }
+        case .menuBar:
+            SettingsForm(tab: .menuBar) {
+                MenuBarSettingsView()
             }
         case .screenAssistant:
             SettingsForm(tab: .screenAssistant) {
@@ -1145,6 +1160,7 @@ struct GeneralSettings: View {
     @Default(.hideNonNotchUntilHover) var hideNonNotchUntilHover
     @Default(.enableCaffeinate) var enableCaffeinate
     @Default(.caffeinateDefaultDuration) var caffeinateDefaultDuration
+    @Default(.logLevel) var logLevel
 
     private func highlightID(_ title: String) -> String {
         SettingsTab.general.highlightID(for: title)
@@ -1229,6 +1245,22 @@ struct GeneralSettings: View {
                 .settingsHighlight(id: highlightID("Hide Dynamic Island during screenshots & recordings"))
             } header: {
                 Text("System features")
+            }
+
+            Section {
+                Picker("Logging Level", selection: Binding(
+                    get: { logLevel.rawValue },
+                    set: { logLevel = LogLevel(rawValue: $0) ?? .none }
+                )) {
+                    ForEach(LogLevel.allCases) { level in
+                        Text(level.displayName).tag(level.rawValue)
+                    }
+                }
+                .settingsHighlight(id: highlightID("Logging Level"))
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("Choose Debug to record detailed information for troubleshooting.")
             }
 
             Section {

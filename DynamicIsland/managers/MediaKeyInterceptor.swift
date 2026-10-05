@@ -138,6 +138,7 @@ final class MediaKeyInterceptor {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isTapEnabled = false
+    private(set) var disabledAfterTimeout = false
     private var retryTimer: Timer?
     private var retryStartDate: Date?
     private var retryAttempts = 0
@@ -148,9 +149,9 @@ final class MediaKeyInterceptor {
     private let eventTapLocations: [CGEventTapLocation] = [.cghidEventTap, .cgSessionEventTap]
 
     private var shouldEnableTap: Bool {
-        configuration.interceptVolume
+        !disabledAfterTimeout && (configuration.interceptVolume
             || configuration.interceptBrightness
-            || configuration.interceptCommandModifiedBrightness
+            || configuration.interceptCommandModifiedBrightness)
     }
 
     private init() {}
@@ -164,8 +165,10 @@ final class MediaKeyInterceptor {
     /// restarts the observer and so retries the tap by accident (#601).
     @discardableResult
     func start() -> Bool {
+        guard !disabledAfterTimeout else { return false }
         guard eventTap == nil else {
             updateTapState()
+            isInterceptionAvailable = true
             return true
         }
 
@@ -323,8 +326,19 @@ final class MediaKeyInterceptor {
         }
     }
 
-    private func handleEvent(cgEvent: CGEvent, type: CGEventType) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+    func handleEvent(cgEvent: CGEvent, type: CGEventType) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout {
+            // Re-enabling a tap on a stalled run loop repeatedly delays system
+            // input. Let macOS handle keys for the rest of this app session instead.
+            disabledAfterTimeout = true
+            isTapEnabled = false
+            if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: false) }
+            isInterceptionAvailable = false
+            SystemOSDManager.enableSystemHUD()
+            NSLog("Media key event tap timed out; interception disabled and native HUD restored")
+            return Unmanaged.passUnretained(cgEvent)
+        }
+        if type == .tapDisabledByUserInput {
             if shouldEnableTap, let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
                 isTapEnabled = true
@@ -336,6 +350,8 @@ final class MediaKeyInterceptor {
             }
             return Unmanaged.passUnretained(cgEvent)
         }
+
+        guard !disabledAfterTimeout else { return Unmanaged.passUnretained(cgEvent) }
 
         guard let systemDefinedType = systemDefinedEventType,
               type == systemDefinedType,
@@ -396,7 +412,7 @@ final class MediaKeyInterceptor {
         modifiers: NSEvent.ModifierFlags
     ) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.shouldEnableTap else { return }
             self.delegate?.mediaKeyInterceptor(
                 self,
                 didReceiveVolumeCommand: direction,
@@ -414,7 +430,7 @@ final class MediaKeyInterceptor {
         modifiers: NSEvent.ModifierFlags
     ) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.shouldEnableTap else { return }
             self.delegate?.mediaKeyInterceptor(
                 self,
                 didReceiveBrightnessCommand: direction,
@@ -427,7 +443,7 @@ final class MediaKeyInterceptor {
 
     private func dispatchMuteCommand() {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.shouldEnableTap else { return }
             self.delegate?.mediaKeyInterceptorDidToggleMute(self)
         }
     }

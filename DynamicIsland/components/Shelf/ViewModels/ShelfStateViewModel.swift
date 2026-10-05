@@ -131,6 +131,7 @@ final class ShelfStateViewModel: ObservableObject {
     }
 
     func remove(_ item: ShelfItem) {
+        Task { await ThumbnailService.shared.clearCache() }
         item.cleanupStoredData()
         items.removeAll { $0.id == item.id }
         invalidateURLCache()

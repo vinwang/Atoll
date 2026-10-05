@@ -25,6 +25,7 @@ class IdleAnimationManager {
     
     // Storage directory for user-imported animations
     private let storageDirectory: URL
+    private var didInitializeDefaults = false
     
     private init() {
         // Create storage directory in Application Support
@@ -41,6 +42,8 @@ class IdleAnimationManager {
     
     /// Load bundled animations from the LottieAnimations folder
     func initializeDefaultAnimations() {
+        guard !didInitializeDefaults else { return }
+        didInitializeDefaults = true
         var animations: [CustomIdleAnimation] = []
         
         // Load bundled Lottie files

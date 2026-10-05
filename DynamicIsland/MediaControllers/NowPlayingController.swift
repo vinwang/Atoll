@@ -256,7 +256,6 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     
     // MARK: - Setup Methods
     private func setupNowPlayingObserver() async {
-        let process = Process()
         guard
             let scriptURL = Bundle.main.url(forResource: "mediaremote-adapter", withExtension: "pl"),
             //let frameworkPath = Bundle.main.privateFrameworksPath?.appending("/MediaRemoteAdapter.framework")
@@ -269,13 +268,16 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             assertionFailure("Could not find mediaremote-adapter.pl script or framework path")
             return
         }
-        
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+
         // --micros swaps the time keys for microsecond equivalents. The default
         // "timestamp" is an ISO-8601 string truncated to whole seconds, which
         // throws away up to a second of the playback anchor and makes every
         // position estimate drift by that much.
-        process.arguments = [scriptURL.path, frameworkPath, "stream", "--micros"]
+        let process = MediaRemoteAdapterProcess.stream(
+            scriptURL: scriptURL,
+            frameworkPath: frameworkPath,
+            options: ["--micros"]
+        )
         
         let pipeHandler = JSONLinesPipeHandler()
         process.standardOutput = await pipeHandler.getPipe()

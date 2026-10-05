@@ -14,6 +14,7 @@ import XCTest
 /// The adapter's diff updates omit what has not changed, so "absent" and
 /// "present but null" mean different things for the playback position. Optional
 /// decoding renders both as nil, so the distinction is pinned here.
+@MainActor
 final class NowPlayingPayloadTests: XCTestCase {
 
     private func decode(_ json: String) throws -> NowPlayingPayload {
@@ -96,6 +97,32 @@ final class NowPlayingPayloadTests: XCTestCase {
         state.duration = 45
 
         XCTAssertFalse(MusicManager.isLikelyAdvertisement(state))
+    }
+
+
+    func testEmptyMetadataIsHeldThenAppliedAsStop() async {
+        let manager = MusicManager(startsControllerSetup: false)
+        defer { manager.destroy() }
+
+        var playing = PlaybackState(bundleIdentifier: "com.apple.Music")
+        playing.title = "Song"
+        playing.artist = "Artist"
+        playing.isPlaying = true
+        manager.updateFromPlaybackState(playing)
+
+        var empty = playing
+        empty.title = " \n"
+        empty.artist = "\t"
+        empty.isPlaying = false
+        manager.updateFromPlaybackState(empty)
+
+        XCTAssertEqual(manager.songTitle, "Song")
+        XCTAssertEqual(manager.artistName, "Artist")
+
+        try? await Task.sleep(for: .milliseconds(1600))
+
+        XCTAssertEqual(manager.songTitle, " \n")
+        XCTAssertEqual(manager.artistName, "\t")
     }
 
     func testAdvertisementHeuristicDoesNotApplyToOtherSources() {

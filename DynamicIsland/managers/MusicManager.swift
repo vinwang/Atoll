@@ -551,6 +551,10 @@ class MusicManager: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var controllerCancellables = Set<AnyCancellable>()
     private var debounceIdleTask: Task<Void, Never>?
+    /// Deadline for holding the last track's metadata across an empty state.
+    private var metadataHoldUntil: Date?
+    private var metadataClearTask: Task<Void, Never>?
+    private static let metadataHoldInterval: TimeInterval = 1.5
     private var optimisticPlayStateTimeoutTask: Task<Void, Never>?
     @MainActor private var optimisticPlaybackTransition = OptimisticPlaybackTransition()
 
@@ -808,6 +812,7 @@ class MusicManager: ObservableObject {
     
     public func destroy() {
         debounceIdleTask?.cancel()
+        metadataClearTask?.cancel()
         optimisticPlayStateTimeoutTask?.cancel()
         lyricsFetchTask?.cancel()
         lyricSyncTask?.cancel()
@@ -913,6 +918,54 @@ class MusicManager: ObservableObject {
     @MainActor
     // swiftlint:disable:next cyclomatic_complexity function_body_length
     func updateFromPlaybackState(_ state: PlaybackState) {
+        // A state that arrives with neither title nor artist while a track is
+        // already on screen is another app taking the now-playing session for a
+        // moment — a web view opened inside a chat app, for one. Publishing it
+        // clears the track, drops the closed notch's live activity and resizes
+        // the notch with it. Hold the previous track rather than the session:
+        // a real stop's empty state is applied when the hold runs out.
+        let hasIncomingMetadata = !(
+            state.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && state.artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        )
+        let playbackSnapshotChanged = state.title != songTitle || state.artist != artistName
+            || state.isPlaying != isPlaying || state.bundleIdentifier != lastArtworkBundleIdentifier
+        if playbackSnapshotChanged {
+            Logger.log(
+                "[Music] playback state bundle=\(state.bundleIdentifier) playing=\(state.isPlaying) "
+                    + "titleEmpty=\(state.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) "
+                    + "artistEmpty=\(state.artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) "
+                    + "incomingMetadata=\(hasIncomingMetadata)",
+                category: .debug
+            )
+        }
+        if hasIncomingMetadata {
+            metadataClearTask?.cancel()
+            metadataClearTask = nil
+            metadataHoldUntil = Date().addingTimeInterval(Self.metadataHoldInterval)
+        } else if let holdUntil = metadataHoldUntil, Date() < holdUntil {
+            let emptyState = state
+            let delay = holdUntil.timeIntervalSinceNow
+            metadataClearTask?.cancel()
+            metadataClearTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(delay))
+                } catch {
+                    return
+                }
+                guard let self, self.metadataHoldUntil == holdUntil else { return }
+                self.metadataHoldUntil = nil
+                self.metadataClearTask = nil
+                Logger.log("[Music] metadata hold expired; applying empty playback state", category: .lifecycle)
+                self.updateFromPlaybackState(emptyState)
+            }
+            return
+        } else {
+            metadataClearTask?.cancel()
+            metadataClearTask = nil
+            metadataHoldUntil = nil
+        }
+
         let advertisement = Self.isLikelyAdvertisement(state)
         let advertisementChanged = advertisement != isAdvertisement
         let advertisementStarted = advertisement && !isAdvertisement

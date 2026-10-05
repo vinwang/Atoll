@@ -185,7 +185,6 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
     }
 
     private func setupNowPlayingObserver() async {
-        let process = Process()
         guard
             let scriptURL = Bundle.main.url(forResource: "mediaremote-adapter", withExtension: "pl"),
             let frameworkPath =
@@ -197,8 +196,10 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
             return
         }
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
-        process.arguments = [scriptURL.path, frameworkPath, "stream"]
+        let process = MediaRemoteAdapterProcess.stream(
+            scriptURL: scriptURL,
+            frameworkPath: frameworkPath
+        )
 
         let pipeHandler = JSONLinesPipeHandler()
         process.standardOutput = await pipeHandler.getPipe()

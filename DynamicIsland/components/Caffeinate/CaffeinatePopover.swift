@@ -27,6 +27,7 @@ import SwiftUI
 struct CaffeinatePopover: View {
     @ObservedObject private var caffeinateManager = CaffeinateManager.shared
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -57,24 +58,52 @@ struct CaffeinatePopover: View {
                 .controlSize(.large)
             }
         }
-        .padding(16)
-        .frame(width: 240)
-        .background(
-            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-                .cornerRadius(12)
-        )
+        .padding(14)
+        .frame(width: 280)
+        .font(.system(size: 13, weight: .medium))
+        .foregroundColor(.white)
+        .background(background)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [.white.opacity(0.26), .white.opacity(0.08)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 1
+                )
+        }
+        .shadow(color: .black.opacity(0.32), radius: 24, y: 12)
+        .environment(\.colorScheme, .dark)
+        .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private var background: some View {
+        if reduceTransparency {
+            Color(white: 0.12)
+        } else {
+            Rectangle().fill(.regularMaterial)
+                .overlay(Color.black.opacity(0.35))
+        }
     }
 
     private var header: some View {
         HStack {
             Image(systemName: caffeinateManager.isActive ? "cup.and.saucer.fill" : "cup.and.saucer")
-                .foregroundStyle(caffeinateManager.isActive ? .yellow : .secondary)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(caffeinateManager.isActive ? Color.yellow : Color.white)
+                .frame(width: 30, height: 30)
+                .background(.white.opacity(0.10), in: Circle())
             VStack(alignment: .leading, spacing: 1) {
                 Text("Keep Awake")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
                 Text(statusText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.8))
                     // A countdown that reflows the popover every second is
                     // distracting, so the row keeps a fixed baseline.
                     .monospacedDigit()
@@ -104,6 +133,7 @@ struct CaffeinatePopover: View {
         } label: {
             HStack {
                 Text(duration.displayName)
+                    .foregroundStyle(.white)
                 Spacer()
                 if isRunning {
                     Image(systemName: "checkmark")
@@ -112,9 +142,14 @@ struct CaffeinatePopover: View {
                 }
             }
             .contentShape(Rectangle())
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                isRunning ? Color.white.opacity(0.13) : .clear,
+                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+            )
         }
         .buttonStyle(.plain)
-        .padding(.vertical, 4)
     }
 }
 

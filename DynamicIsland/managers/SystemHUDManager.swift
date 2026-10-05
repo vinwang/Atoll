@@ -322,8 +322,11 @@ class SystemHUDManager {
         // is in force now.
         lastNativeHUDLockState = nil
 
-        // Force disable system HUD to ensure no duplicates
-        SystemOSDManager.disableSystemHUD()
+        if MediaKeyInterceptor.shared.disabledAfterTimeout {
+            SystemOSDManager.enableSystemHUD()
+        } else {
+            SystemOSDManager.disableSystemHUD()
+        }
         
         print("System observer started (HUD: \(Defaults[.enableSystemHUD]), OSD: \(Defaults[.enableCustomOSD]), Vertical: \(Defaults[.enableVerticalHUD]), ThirdPartyDDC: \(Defaults[.enableThirdPartyDDCIntegration]), Provider: \(Defaults[.thirdPartyDDCProvider].displayName), ExternalVolumeListener: \(Defaults[.enableExternalVolumeControlListener]))")
         isSystemOperationInProgress = false
@@ -351,7 +354,8 @@ class SystemHUDManager {
         guard isLocked != lastNativeHUDLockState else { return }
         lastNativeHUDLockState = isLocked
 
-        if SystemHUDPlacement.yieldsToNativeHUD(isLocked: isLocked) {
+        if SystemHUDPlacement.yieldsToNativeHUD(isLocked: isLocked)
+            || MediaKeyInterceptor.shared.disabledAfterTimeout {
             SystemOSDManager.enableSystemHUD()
         } else {
             SystemOSDManager.disableSystemHUD()

@@ -60,6 +60,7 @@ struct TabSelectionView: View {
     @Default(.showMirror) private var showMirror
     @Default(.showStandardMediaControls) private var showStandardMediaControls
     @Default(.enableMinimalisticUI) private var enableMinimalisticUI
+    @Default(.enableMenuBarDrawer) private var enableMenuBarDrawer
     @Namespace var animation
     
     private var tabs: [TabModel] {
@@ -67,6 +68,10 @@ struct TabSelectionView: View {
 
         if homeTabVisible {
             tabsArray.append(TabModel(label: "Home", icon: "house.fill", view: .home))
+        }
+
+        if enableMenuBarDrawer && !enableMinimalisticUI {
+            tabsArray.append(TabModel(label: "Menu Bar", icon: "menubar.rectangle", view: .menuBar))
         }
 
         if Defaults[.dynamicShelf] {

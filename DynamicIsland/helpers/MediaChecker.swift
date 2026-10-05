@@ -22,6 +22,48 @@
 
 import Foundation
 
+enum MediaRemoteAdapterProcess {
+    private static let watchdogScript = #"""
+        parent_pid=$1
+        shift
+        /usr/bin/perl "$@" &
+        adapter_pid=$!
+
+        cleanup() {
+            kill "$adapter_pid" 2>/dev/null
+            wait "$adapter_pid" 2>/dev/null
+        }
+
+        trap cleanup EXIT
+        trap 'exit 0' HUP INT TERM
+
+        while kill -0 "$parent_pid" 2>/dev/null && kill -0 "$adapter_pid" 2>/dev/null; do
+            read -r -t 1 _ || true
+        done
+        """#
+
+    static func stream(
+        scriptURL: URL,
+        frameworkPath: String,
+        options: [String] = [],
+        parentProcessIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier
+    ) -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            watchdogScript,
+            "mediaremote-adapter-watchdog",
+            String(parentProcessIdentifier),
+            scriptURL.path,
+            frameworkPath,
+            "stream",
+        ] + options
+        process.standardInput = Pipe()
+        return process
+    }
+}
+
 @MainActor
 final class MediaChecker: Sendable {
     enum MediaCheckerError: Error {

@@ -40,8 +40,17 @@ class BluetoothAudioManager: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let coordinator = DynamicIslandViewCoordinator.shared
     private var pollingTimer: Timer?
+    private let deviceFetchQueue = DispatchQueue(
+        label: "com.dynamicisland.bluetooth.devices", qos: .utility
+    )
+    private let devicePollingInterval: TimeInterval = 15
+    private var isDeviceRefreshInFlight = false
     private let bluetoothPreferencesSuite = "/Library/Preferences/com.apple.Bluetooth"
-    private let batteryReader = BluetoothLEBatteryReader()
+    // CoreBluetooth can synchronously enter the system permission flow while
+    // constructing CBCentralManager. Keep it out of the launch path; create it
+    // only when a battery lookup is actually needed and access is already
+    // granted.
+    private var batteryReader: BluetoothLEBatteryReader?
     private var isLiveBatteryRefreshInFlight = false
 
     private let appleVendorID: UInt16 = 0x05AC
@@ -106,6 +115,8 @@ class BluetoothAudioManager: ObservableObject {
     private var listeningModePresentationTask: Task<Void, Never>?
     private var lastListeningModeByAddress: [String: AirPodsListeningMode] = [:]
     private var listeningModeRefreshTask: Task<Void, Never>?
+    private let listeningModeRefreshLock = NSLock()
+    private var lastListeningModeRefreshDate = Date.distantPast
     private let listeningModeLogObserver = AirPodsListeningModeLogObserver()
     private let listeningModeNotificationNames: [Notification.Name] = [
         Notification.Name("com.apple.AudioAccessory.prefsChanged"),
@@ -251,87 +262,70 @@ class BluetoothAudioManager: ObservableObject {
     
     /// Starts polling for device connection changes (fallback mechanism)
     private func startPollingForChanges() {
-        print("🎧 [BluetoothAudioManager] Starting polling timer (3s interval)...")
+        print("🎧 [BluetoothAudioManager] Starting polling timer (15s interval)...")
+        Logger.log("[Bluetooth] polling started interval=\(devicePollingInterval)s", category: .lifecycle)
         
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: devicePollingInterval, repeats: true) { [weak self] _ in
             self?.checkForDeviceChanges()
         }
     }
     
     /// Checks for device connection/disconnection changes
     private func checkForDeviceChanges() {
-        // Check if Bluetooth is powered on
-        guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
-            // Bluetooth is off - clear connected devices if any
-            if !connectedDevices.isEmpty {
-                print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth powered off - clearing connected devices")
-                connectedDevices.removeAll()
-                isBluetoothAudioConnected = false
+        guard !isDeviceRefreshInFlight else { return }
+        isDeviceRefreshInFlight = true
+
+        deviceFetchQueue.async { [weak self] in
+            guard let self else { return }
+
+            let devices: [BluetoothAudioDevice]
+            if IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON,
+               let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] {
+                devices = pairedDevices
+                    .filter { $0.isConnected() && self.isAudioDevice($0) }
+                    .compactMap { self.createBluetoothAudioDevice(from: $0) }
+            } else {
+                devices = []
             }
-            return
-        }
-        
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
-            return
-        }
-        
-        let currentlyConnectedAddresses = Set(
-            pairedDevices
-                .filter { $0.isConnected() && isAudioDevice($0) }
-                .compactMap { $0.addressString }
-        )
-        
-        let previousAddresses = Set(connectedDevices.map { $0.address })
-        
-        // Check for new connections
-        let newAddresses = currentlyConnectedAddresses.subtracting(previousAddresses)
-        if !newAddresses.isEmpty {
-            print("🎧 [BluetoothAudioManager] 🔍 Polling detected new connection(s)")
-            checkForNewlyConnectedDevices()
-        }
-        
-        // Check for disconnections
-        let removedAddresses = previousAddresses.subtracting(currentlyConnectedAddresses)
-        if !removedAddresses.isEmpty {
-            print("🎧 [BluetoothAudioManager] 🔍 Polling detected disconnection(s)")
-            updateConnectedDevices()
+
+            DispatchQueue.main.async {
+                self.isDeviceRefreshInFlight = false
+                let previous = self.connectedDevices
+                let previousAddresses = Set(previous.map(\.address))
+                let currentAddresses = Set(devices.map(\.address))
+                let added = currentAddresses.subtracting(previousAddresses)
+                let removed = previous.filter { !currentAddresses.contains($0.address) }
+                guard !added.isEmpty || !removed.isEmpty else { return }
+
+                Logger.log(
+                    "[Bluetooth] device change added=\(added.count) removed=\(removed.count) connected=\(devices.count)",
+                    category: .debug
+                )
+
+                if !added.isEmpty {
+                    print("🎧 [BluetoothAudioManager] 🔍 Bluetooth polling detected new connection(s)")
+                }
+                if !removed.isEmpty {
+                    print("🎧 [BluetoothAudioManager] 🔍 Bluetooth polling detected disconnection(s)")
+                    removed.forEach { self.cancelHUDBatteryWait(for: $0) }
+                }
+
+                self.connectedDevices = devices
+                self.lastConnectedDevice = devices.last
+                self.isBluetoothAudioConnected = !devices.isEmpty
+                self.refreshBatteryLevelsForConnectedDevices()
+
+                for device in devices where added.contains(device.address) {
+                    self.showDeviceConnectedHUD(device)
+                }
+            }
         }
     }
     
     /// Checks for already connected Bluetooth audio devices on init
     private func checkInitialDevices() {
         print("🎧 [BluetoothAudioManager] Checking for initially connected devices...")
-        
-        // Check if Bluetooth is powered on
-        guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
-            print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth is powered off - skipping initial check")
-            return
-        }
-        
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
-            print("🎧 [BluetoothAudioManager] No paired devices found")
-            return
-        }
-        
-        let connectedAudioDevices = pairedDevices.filter { device in
-            device.isConnected() && isAudioDevice(device)
-        }
-        
-        print("🎧 [BluetoothAudioManager] Found \(connectedAudioDevices.count) connected audio devices")
-        
-        connectedDevices = connectedAudioDevices.compactMap { device in
-            createBluetoothAudioDevice(from: device)
-        }
-        
-        // Update connection state
-        isBluetoothAudioConnected = !connectedDevices.isEmpty
-        
-        refreshBatteryLevelsForConnectedDevices()
-
-        if let lastDevice = connectedDevices.last {
-            lastConnectedDevice = lastDevice
-            print("🎧 [BluetoothAudioManager] ✅ Bluetooth audio connected: \(lastDevice.name)")
-        }
+        checkForDeviceChanges()
     }
     
     // MARK: - Device Event Handlers
@@ -345,7 +339,7 @@ class BluetoothAudioManager: ObservableObject {
         // someone asking about that device.
         invalidateProfilerSnapshot()
         // Re-check all devices since distributed notification doesn't contain device object
-        checkForNewlyConnectedDevices()
+        DispatchQueue.main.async { [weak self] in self?.checkForDeviceChanges() }
     }
     
     /// Handles Bluetooth device disconnection notification from DistributedNotificationCenter
@@ -354,7 +348,7 @@ class BluetoothAudioManager: ObservableObject {
 
         invalidateProfilerSnapshot()
         // Re-check all devices to update connection state
-        updateConnectedDevices()
+        DispatchQueue.main.async { [weak self] in self?.checkForDeviceChanges() }
     }
 
     @objc private func handleAirPodsListeningModeNotification(_ notification: Notification) {
@@ -410,79 +404,6 @@ class BluetoothAudioManager: ObservableObject {
 
         guard let device else { return }
         presentListeningModeIfChanged(AirPodsListeningModeEvent(device: device, mode: mode))
-    }
-    
-    /// Checks for newly connected devices and displays HUD for new ones
-    private func checkForNewlyConnectedDevices() {
-        // Check if Bluetooth is powered on
-        guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
-            print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth is powered off - skipping device check")
-            return
-        }
-        
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
-            return
-        }
-        
-        let currentlyConnectedDevices = pairedDevices.filter { device in
-            device.isConnected() && isAudioDevice(device)
-        }
-        
-        // Find devices that are newly connected
-        for device in currentlyConnectedDevices {
-            let address = device.addressString ?? "Unknown"
-            
-            // Check if this device wasn't in our list before
-            if !connectedDevices.contains(where: { $0.address == address }) {
-                print("🎧 [BluetoothAudioManager] 🎉 New audio device connected: \(device.name ?? "Unknown")")
-                
-                guard let audioDevice = createBluetoothAudioDevice(from: device) else {
-                    continue
-                }
-                
-                // Add to connected devices
-                connectedDevices.append(audioDevice)
-                lastConnectedDevice = audioDevice
-                isBluetoothAudioConnected = true
-
-                refreshBatteryLevelsForConnectedDevices()
-                
-                // Show HUD for new connection
-                if let refreshedDevice = connectedDevices.last {
-                    showDeviceConnectedHUD(refreshedDevice)
-                } else {
-                    showDeviceConnectedHUD(audioDevice)
-                }
-            }
-        }
-    }
-    
-    /// Updates the list of connected devices (for disconnections)
-    private func updateConnectedDevices() {
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
-            return
-        }
-        
-        let currentlyConnectedAddresses = pairedDevices
-            .filter { $0.isConnected() && isAudioDevice($0) }
-            .compactMap { $0.addressString }
-        
-        // Remove disconnected devices
-        let removedDevices = connectedDevices.filter { device in
-            !currentlyConnectedAddresses.contains(device.address)
-        }
-        connectedDevices.removeAll { device in
-            !currentlyConnectedAddresses.contains(device.address)
-        }
-        
-        if !removedDevices.isEmpty {
-            print("🎧 [BluetoothAudioManager] 👋 Audio device(s) disconnected")
-            removedDevices.forEach { cancelHUDBatteryWait(for: $0) }
-        }
-        
-        isBluetoothAudioConnected = !connectedDevices.isEmpty
-
-        refreshBatteryLevelsForConnectedDevices()
     }
     
     /// Handles Bluetooth device connection event (legacy - kept for compatibility)
@@ -963,12 +884,35 @@ class BluetoothAudioManager: ObservableObject {
         let lookups = coreBluetoothLookups(for: connectedDevices)
         guard !lookups.isEmpty else { return }
 
+        // Do not implicitly trigger the macOS Bluetooth prompt. A not-yet-
+        // decided request can block the app while TCC presents its sheet.
+        // Battery data remains optional and the existing IOBluetooth/pmset
+        // fallbacks continue to work when access is denied.
+        guard CBManager.authorization == .allowedAlways else {
+            Logger.log("[Bluetooth] skipped CoreBluetooth battery lookup authorization=\(CBManager.authorization.rawValue)", category: .warning)
+            return
+        }
+        let existingReader = batteryReader
         isLiveBatteryRefreshInFlight = true
-        batteryReader.fetchBatteryLevels(for: lookups) { [weak self] results in
+
+        deviceFetchQueue.async { [weak self] in
             guard let self else { return }
-            DispatchQueue.main.async {
-                self.isLiveBatteryRefreshInFlight = false
-                self.handleLiveBatteryResults(results)
+            let reader: BluetoothLEBatteryReader
+            if let existingReader {
+                reader = existingReader
+            } else {
+                reader = BluetoothLEBatteryReader(callbackQueue: self.deviceFetchQueue)
+                DispatchQueue.main.sync {
+                    self.batteryReader = reader
+                }
+            }
+
+            reader.fetchBatteryLevels(for: lookups) { [weak self] results in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    self.isLiveBatteryRefreshInFlight = false
+                    self.handleLiveBatteryResults(results)
+                }
             }
         }
     }
@@ -1961,18 +1905,31 @@ class BluetoothAudioManager: ObservableObject {
     }
 
     private func scheduleEventDrivenListeningModeRefresh(reason: String) {
+        let now = Date()
+        listeningModeRefreshLock.lock()
+        let shouldSchedule: Bool
+        if now.timeIntervalSince(lastListeningModeRefreshDate) >= 1 {
+            lastListeningModeRefreshDate = now
+            shouldSchedule = true
+        } else {
+            shouldSchedule = false
+        }
+        listeningModeRefreshLock.unlock()
+        guard shouldSchedule else { return }
+
         listeningModeRefreshTask?.cancel()
         listeningModeRefreshTask = Task.detached(priority: .utility) { [weak self] in
             try? await Task.sleep(nanoseconds: 180_000_000)
             guard let self, !Task.isCancelled else { return }
 
-            await MainActor.run {
-                guard let device = self.primaryConnectedAirPodsDevice(),
-                      let mode = self.readListeningModeViaDynamicSelectors(for: device) ??
-                        Self.readListeningModeFromIORegistry() else {
-                    return
-                }
+            guard let device = await MainActor.run(body: { self.primaryConnectedAirPodsDevice() }),
+                  let mode = self.readListeningModeViaDynamicSelectors(for: device) ??
+                    Self.readListeningModeFromIORegistry(),
+                  !Task.isCancelled else {
+                return
+            }
 
+            await MainActor.run {
                 self.presentListeningModeIfChanged(
                     AirPodsListeningModeEvent(device: device, mode: mode)
                 )
@@ -2305,9 +2262,9 @@ private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate
     private var missingUUIDs: Set<UUID> = []
     private var timeoutWorkItem: DispatchWorkItem?
 
-    override init() {
+    init(callbackQueue: DispatchQueue) {
         super.init()
-        central = CBCentralManager(delegate: self, queue: nil)
+        central = CBCentralManager(delegate: self, queue: callbackQueue)
     }
 
     func fetchBatteryLevels(for lookups: [Lookup], completion: @escaping ([Result]) -> Void) {
