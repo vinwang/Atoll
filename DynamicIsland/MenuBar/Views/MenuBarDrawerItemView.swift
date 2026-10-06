@@ -45,8 +45,8 @@ struct MenuBarDrawerItemView: View {
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay {
             MenuBarDrawerClickView(
-                onLeftClick: { click(.left) },
-                onRightClick: { click(.right) }
+                onLeftClick: { click(.left, on: $0) },
+                onRightClick: { click(.right, on: $0) }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -56,10 +56,10 @@ struct MenuBarDrawerItemView: View {
         .accessibilityHint("Activates the original menu bar item")
     }
 
-    private func click(_ button: CGMouseButton) {
+    private func click(_ button: CGMouseButton, on screen: NSScreen?) {
         Task {
             do {
-                try await MenuBarHiddenSection.shared.click(item, button: button)
+                try await MenuBarHiddenSection.shared.click(item, button: button, on: screen)
             } catch {
                 Logger.log("[MenuBar] interaction failed: \(error.localizedDescription)", category: .warning)
             }
@@ -69,14 +69,14 @@ struct MenuBarDrawerItemView: View {
 
 private struct MenuBarDrawerClickView: NSViewRepresentable {
     final class RepresentedView: NSView {
-        var onLeftClick: () -> Void
-        var onRightClick: () -> Void
+        var onLeftClick: (NSScreen?) -> Void
+        var onRightClick: (NSScreen?) -> Void
         private var leftMouseDownDate = Date.distantPast
         private var rightMouseDownDate = Date.distantPast
         private var leftMouseDownLocation = CGPoint.zero
         private var rightMouseDownLocation = CGPoint.zero
 
-        init(onLeftClick: @escaping () -> Void, onRightClick: @escaping () -> Void) {
+        init(onLeftClick: @escaping (NSScreen?) -> Void, onRightClick: @escaping (NSScreen?) -> Void) {
             self.onLeftClick = onLeftClick
             self.onRightClick = onRightClick
             super.init(frame: .zero)
@@ -86,6 +86,8 @@ private struct MenuBarDrawerClickView: NSViewRepresentable {
         required init?(coder: NSCoder) {
             fatalError("init(coder:) has not been implemented")
         }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
         override func mouseDown(with event: NSEvent) {
             leftMouseDownDate = .now
@@ -97,7 +99,7 @@ private struct MenuBarDrawerClickView: NSViewRepresentable {
                   distance(from: leftMouseDownLocation, to: NSEvent.mouseLocation) < 5 else {
                 return
             }
-            onLeftClick()
+            onLeftClick(drawerScreen)
         }
 
         override func rightMouseDown(with event: NSEvent) {
@@ -110,7 +112,14 @@ private struct MenuBarDrawerClickView: NSViewRepresentable {
                   distance(from: rightMouseDownLocation, to: NSEvent.mouseLocation) < 5 else {
                 return
             }
-            onRightClick()
+            onRightClick(drawerScreen)
+        }
+
+        private var drawerScreen: NSScreen? {
+            guard let window else { return nil }
+            // A window in the notch's custom Space can report a nil screen.
+            let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
+            return NSScreen.screens.first { $0.frame.contains(center) } ?? window.screen
         }
 
         private func distance(from first: CGPoint, to second: CGPoint) -> CGFloat {
@@ -118,8 +127,8 @@ private struct MenuBarDrawerClickView: NSViewRepresentable {
         }
     }
 
-    let onLeftClick: () -> Void
-    let onRightClick: () -> Void
+    let onLeftClick: (NSScreen?) -> Void
+    let onRightClick: (NSScreen?) -> Void
 
     func makeNSView(context: Context) -> RepresentedView {
         RepresentedView(onLeftClick: onLeftClick, onRightClick: onRightClick)

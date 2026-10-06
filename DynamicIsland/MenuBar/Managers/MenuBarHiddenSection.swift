@@ -35,6 +35,7 @@ final class MenuBarHiddenSection: NSObject, ObservableObject {
     /// Popped up on a right click of the control; the left click toggles hiding.
     private var controlMenu: NSMenu?
     private var operation: Task<Void, Never>?
+    private var clickMonitor: Task<Void, Never>?
     private var generation = 0
     private var sessionItems: [ManagedMenuBarItem] = []
     private var hiddenDisplaySignature: String?
@@ -170,6 +171,8 @@ final class MenuBarHiddenSection: NSObject, ObservableObject {
     }
 
     private func toggleHidingFromControl() {
+        clickMonitor?.cancel()
+        clickMonitor = nil
         if isBusy {
             // Startup can begin an automatic hide before the status item is
             // ready for input. Treat a click during that window as cancel.
@@ -228,6 +231,8 @@ final class MenuBarHiddenSection: NSObject, ObservableObject {
         generation += 1
         operation?.cancel()
         operation = nil
+        clickMonitor?.cancel()
+        clickMonitor = nil
         MenuBarItemInteractionService.shared.cancelPendingMove()
         reveal()
         if let divider { NSStatusBar.system.removeStatusItem(divider) }
@@ -510,7 +515,7 @@ final class MenuBarHiddenSection: NSObject, ObservableObject {
                 return
             }
             let strip = MenuBarOverflowBoundary.menuBarStrip(of: placement.display)
-            let raw = await scanner.scan()
+            let raw = await scanner.scan(targetDisplay: placement.display)
             scanSnapshotRaw = raw
             let items = raw.filter { MenuBarOverflowBoundary.isOnBar($0.frame, strips: [strip]) }
             scanSnapshot = items
@@ -698,15 +703,25 @@ final class MenuBarHiddenSection: NSObject, ObservableObject {
             !ids.contains($0.id) && NSRunningApplication(processIdentifier: $0.ownerPID)?.isTerminated == false
         }
     }
-    func click(_ item: ManagedMenuBarItem, button: CGMouseButton) async throws {
+    func click(_ item: ManagedMenuBarItem, button: CGMouseButton, on screen: NSScreen? = nil) async throws {
         Logger.log(
             "[MenuBar] drawer item click name=\(item.displayName) button=\(button == .right ? "right" : "left") hidden=\(isHidden) busy=\(isBusy)",
             category: .debug
         )
+        // Application opens do not move the bar or inject mouse events, so they need no layout lock.
+        if button == .left, try await MenuBarItemInteractionService.openApplication(for: item) {
+            return
+        }
         guard !isBusy else { return }
-        let wasHidden = isHidden
+        let wasHidden = isHidden || clickMonitor != nil
+        clickMonitor?.cancel()
+        clickMonitor = nil
         let currentGeneration = generation
         let native = MenuBarOverflowBoundary.isNativeOverflowSystem
+        let targetScreen = screen ?? NSScreen.main
+        let targetDisplay = (targetScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+            .map { CGDisplayBounds($0.uint32Value) }
+        Logger.log("[MenuBar] drawer display screen=\(targetScreen?.localizedName ?? "unknown") bounds=\(String(describing: targetDisplay))", category: .debug)
         isBusy = true
         defer { isBusy = false }
 
@@ -717,25 +732,52 @@ final class MenuBarHiddenSection: NSObject, ObservableObject {
             if wasHidden { try await Task.sleep(for: .milliseconds(native ? 300 : 200)) }
             let before = await Task.detached { Self.interfaceWindows(pid: item.ownerPID) }.value
             if button == .right {
-                try await MenuBarItemInteractionService.shared.rightClick(item)
+                try await MenuBarItemInteractionService.shared.rightClick(item, targetDisplay: targetDisplay)
             } else {
-                try await MenuBarItemInteractionService.shared.leftClick(item)
+                try await MenuBarItemInteractionService.shared.leftClick(item, targetDisplay: targetDisplay)
+            }
+            Logger.log("[MenuBar] click delivered name=\(item.displayName)", category: .debug)
+            try Task.checkCancellation()
+            guard generation == currentGeneration else { return }
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(300))
+                guard let self, self.generation == currentGeneration else { return }
+                let after = await Task.detached { Self.interfaceWindows(pid: item.ownerPID) }.value
+                Logger.log("[MenuBar] click response name=\(item.displayName) addedWindows=\(after.subtracting(before).count) frontmost=\(NSWorkspace.shared.frontmostApplication?.processIdentifier == item.ownerPID)", category: .debug)
             }
             guard wasHidden else { return }
+            clickMonitor = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    if !Task.isCancelled { self.clickMonitor = nil }
+                }
+                await self.waitForInterfaceToClose(item, before: before, generation: currentGeneration, native: native)
+            }
+        } catch {
+            reveal()
+            message = "点击失败，已保持展开：\(error.localizedDescription)"
+            throw error
+        }
+    }
+
+    private func waitForInterfaceToClose(_ item: ManagedMenuBarItem, before: Set<CGWindowID>, generation currentGeneration: Int, native: Bool) async {
+        do {
             // Only rehide after an observed interface closes. Timeout leaves everything visible.
             var opened = Set<CGWindowID>()
             for _ in 0..<240 {
                 try await Task.sleep(for: .milliseconds(250))
-                guard generation == currentGeneration, Defaults[.menuBarHideSelectedItems], divider != nil else { return }
+                guard !Task.isCancelled, generation == currentGeneration, Defaults[.menuBarHideSelectedItems], divider != nil else { return }
                 let current = await Task.detached { Self.interfaceWindows(pid: item.ownerPID) }.value
+                guard !Task.isCancelled else { return }
                 opened.formUnion(current.subtracting(before))
                 if !opened.isEmpty && opened.isDisjoint(with: current) {
                     if native {
-                        await concealNativelyCore()
+                        guard !isBusy else { return }
+                        await concealNatively()
                         return
                     }
                     let items = await scanner.scan()
-                    if generation == currentGeneration, let frame = dividerFrame(), Self.canCollapse(items: items, selectedIDs: Set(Defaults[.selectedMenuBarItems]), divider: frame) {
+                    if !Task.isCancelled, !isBusy, generation == currentGeneration, let frame = dividerFrame(), Self.canCollapse(items: items, selectedIDs: Set(Defaults[.selectedMenuBarItems]), divider: frame) {
                         sessionItems = items.filter { Defaults[.selectedMenuBarItems].contains($0.id) }
                         Defaults[.menuBarHiddenSessionActive] = true
                         divider?.length = 10_000
@@ -748,11 +790,7 @@ final class MenuBarHiddenSection: NSObject, ObservableObject {
                 }
             }
             message = "无法确认菜单已关闭，已保持展开。需要时可手动再次隐藏。"
-        } catch {
-            reveal()
-            message = "点击失败，已保持展开：\(error.localizedDescription)"
-            throw error
-        }
+        } catch { /* A later click or restore cancels monitoring. */ }
     }
 
     private nonisolated static func interfaceWindows(pid: pid_t) -> Set<CGWindowID> {

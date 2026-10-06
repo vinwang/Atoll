@@ -23,7 +23,7 @@ struct MenuBarItemScanner {
     static let nativeOverflowExcludedOwners: Set<String> = ["com.apple.MenuBarAgent"]
 
     @MainActor
-    func scan() async -> [ManagedMenuBarItem] {
+    func scan(targetDisplay: CGRect? = nil, allDisplays: Bool = false) async -> [ManagedMenuBarItem] {
         let excludedBundleIdentifier = Bundle.main.bundleIdentifier
         let excludedPID = ProcessInfo.processInfo.processIdentifier
         let nativeOverflow = MenuBarOverflowBoundary.isNativeOverflowSystem
@@ -31,8 +31,8 @@ struct MenuBarItemScanner {
         // only on the one with the menu bar, so the legacy "same screen as
         // NSScreen.main" filter would drop every item on the other display.
         // The per-display bar strips below are the correct filter there.
-        let targetScreenFrame = nativeOverflow ? nil : (NSScreen.main?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
-            .map { CGDisplayBounds($0.uint32Value) }
+        let targetScreenFrame = allDisplays ? nil : (targetDisplay ?? (nativeOverflow ? nil : (NSScreen.main?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+            .map { CGDisplayBounds($0.uint32Value) }))
         // Overflowed items keep stale frames, sometimes below the display, so
         // on macOS 27 an item must sit in some display's menu bar strip.
         let menuBarStrips: [CGRect]? = nativeOverflow ? NSScreen.screens.compactMap { screen in
@@ -56,14 +56,14 @@ struct MenuBarItemScanner {
         }
 
         return await Task.detached(priority: .utility) {
-            Self.scanSynchronously(
+            autoreleasepool { Self.scanSynchronously(
                 excludedBundleIdentifier: excludedBundleIdentifier,
                 excludedPID: excludedPID,
                 targetScreenFrame: targetScreenFrame,
                 accessibilityHosts: accessibilityHosts,
                 menuBarStrips: menuBarStrips,
                 excludedOwners: excludedOwners
-            )
+            ) }
         }.value
     }
 
@@ -99,9 +99,7 @@ struct MenuBarItemScanner {
             )
             items = merged(windowItems, accessibilityItems)
         }
-        for item in items {
-            Logger.log("[MenuBar] discovered item: \(item.displayName)", category: .debug)
-        }
+        Logger.log("[MenuBar] scan completed items=\(items.count)", category: .debug)
         return items
     }
 
@@ -218,17 +216,23 @@ enum MenuBarAccessibilityBridge {
     }
 
     static func press(_ item: ManagedMenuBarItem) -> Bool {
-        guard AXIsProcessTrusted() else { return false }
+        guard !Task.isCancelled, AXIsProcessTrusted() else { return false }
         let application = AXUIElementCreateApplication(item.ownerPID)
         AXUIElementSetMessagingTimeout(application, messagingTimeout)
         guard let menuBar = elementAttribute(extrasMenuBarAttribute, of: application) else {
             return false
         }
+        AXUIElementSetMessagingTimeout(menuBar, messagingTimeout)
         let center = CGPoint(x: item.frame.midX, y: item.frame.midY)
-        guard let element = children(of: menuBar).first(where: { frame(of: $0)?.contains(center) == true }) else {
-            return false
+        for element in children(of: menuBar) {
+            guard !Task.isCancelled else { return false }
+            AXUIElementSetMessagingTimeout(element, messagingTimeout)
+            if frame(of: element)?.contains(center) == true {
+                guard !Task.isCancelled else { return false }
+                return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+            }
         }
-        return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+        return false
     }
 
     private static func elementAttribute(_ attribute: CFString, of element: AXUIElement) -> AXUIElement? {

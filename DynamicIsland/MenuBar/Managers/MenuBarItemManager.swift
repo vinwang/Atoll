@@ -19,7 +19,7 @@ final class MenuBarItemManager: ObservableObject {
 
     @Published private(set) var items: [ManagedMenuBarItem] = []
     @Published private(set) var selectedItems: [ManagedMenuBarItem] = []
-    @Published private(set) var isScanning = false
+    private var isScanning = false
 
     private let scanner: MenuBarItemScanner
     private var selectedIdentityIDs: [String]
@@ -133,7 +133,7 @@ final class MenuBarItemManager: ObservableObject {
             }
         )
 
-        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshNow() }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -210,7 +210,8 @@ final class MenuBarItemManager: ObservableObject {
 
     private func finishScan(_ result: [ManagedMenuBarItem]) async {
         let previousSelectedItems = selectedItems
-        items = MenuBarHiddenSection.shared.retainedItems(among: result)
+        let refreshedItems = MenuBarHiddenSection.shared.retainedItems(among: result)
+        if items != refreshedItems { items = refreshedItems }
         await MenuBarHiddenSection.shared.updateHiddenSide(with: items)
         guard !Task.isCancelled else { return }
         updateSelectedItems()
@@ -225,7 +226,9 @@ final class MenuBarItemManager: ObservableObject {
     }
 
     private func updateSelectedItems() {
-        selectedItems = MenuBarItemSelection.matching(items, selectedIDs: selectedIdentityIDs)
+        let matched = MenuBarItemSelection.matching(items, selectedIDs: selectedIdentityIDs)
+        guard selectedItems != matched else { return }
+        selectedItems = matched
         for item in selectedItems {
             Logger.log("[MenuBar] matched selected item: \(item.displayName)", category: .debug)
         }

@@ -68,7 +68,7 @@ extension Defaults.Keys {
     static let selectedMenuBarItems = Key<[String]>("selectedMenuBarItems", default: [], suite: hiddenTestSuite)
 }
 struct MenuBarItemScanner {
-    func scan() async -> [ManagedMenuBarItem] { [] }
+    func scan(targetDisplay: CGRect? = nil) async -> [ManagedMenuBarItem] { [] }
 }
 enum MenuBarAccessibilityBridge {
     struct OwnStatusItem: Equatable, Sendable {
@@ -103,10 +103,11 @@ enum MenuBarLayout {
 enum MenuBarItemInteractionError: Error { case itemUnavailable }
 final class MenuBarItemInteractionService {
     static let shared = MenuBarItemInteractionService()
+    @MainActor static func openApplication(for item: ManagedMenuBarItem) async throws -> Bool { false }
     func cancelPendingMove() {}
     func move(_ item: ManagedMenuBarItem, to point: CGPoint) async throws { fatalError("Unexpected move") }
-    func leftClick(_ item: ManagedMenuBarItem) async throws { fatalError("Unexpected click") }
-    func rightClick(_ item: ManagedMenuBarItem) async throws { fatalError("Unexpected click") }
+    func leftClick(_ item: ManagedMenuBarItem, targetDisplay: CGRect? = nil) async throws { fatalError("Unexpected click") }
+    func rightClick(_ item: ManagedMenuBarItem, targetDisplay: CGRect? = nil) async throws { fatalError("Unexpected click") }
 }
 @MainActor final class MenuBarItemManager {
     static let shared = MenuBarItemManager()

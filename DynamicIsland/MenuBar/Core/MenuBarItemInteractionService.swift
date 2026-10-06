@@ -15,6 +15,7 @@
  */
 
 import ApplicationServices
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -42,12 +43,31 @@ final class MenuBarItemInteractionService: @unchecked Sendable {
 
     private init() {}
 
-    func leftClick(_ item: ManagedMenuBarItem) async throws {
-        try await click(item, button: .left)
+    func leftClick(_ item: ManagedMenuBarItem, targetDisplay: CGRect? = nil) async throws {
+        if try await Self.openApplication(for: item) { return }
+        try await click(item, button: .left, targetDisplay: targetDisplay)
     }
 
-    func rightClick(_ item: ManagedMenuBarItem) async throws {
-        try await click(item, button: .right)
+    func rightClick(_ item: ManagedMenuBarItem, targetDisplay: CGRect? = nil) async throws {
+        try await click(item, button: .right, targetDisplay: targetDisplay)
+    }
+
+    @MainActor static func openApplication(for item: ManagedMenuBarItem) async throws -> Bool {
+        try Task.checkCancellation()
+        guard let application = NSRunningApplication(processIdentifier: item.ownerPID),
+              !application.isTerminated,
+              application.bundleIdentifier == item.bundleIdentifier,
+              let url = application.bundleURL,
+              let bundle = Bundle(url: url) else { return false }
+        // Some ordinary apps switch to accessory mode while their window is closed.
+        let menuBarOnly = bundle.object(forInfoDictionaryKey: "LSUIElement") as? Bool ?? false
+        guard application.activationPolicy == .regular || !menuBarOnly else { return false }
+        // Opening sends the native reopen request, including when all windows were closed.
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        _ = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+        Logger.log("[MenuBar] application reopened name=\(item.displayName)", category: .debug)
+        return true
     }
 
     /// Command-drag is the native menu bar reorder gesture. Callers verify the final layout.
@@ -99,23 +119,31 @@ final class MenuBarItemInteractionService: @unchecked Sendable {
         releaseDrag = nil
     }
 
-    private func click(_ item: ManagedMenuBarItem, button: CGMouseButton) async throws {
+    private func click(_ item: ManagedMenuBarItem, button: CGMouseButton, targetDisplay: CGRect?) async throws {
         guard AXIsProcessTrusted() else {
             throw MenuBarItemInteractionError.accessibilityRequired
         }
 
-        guard let latest = await scanner.scan().first(where: { $0.id == item.id }) else {
+        var current = await scanner.scan(targetDisplay: targetDisplay).first(where: { $0.id == item.id })
+        if current == nil, targetDisplay != nil {
+            // The system can reveal the item on a different display from the drawer.
+            current = await scanner.scan(allDisplays: true).first(where: { $0.id == item.id })
+        }
+        guard let latest = current else {
             throw MenuBarItemInteractionError.itemUnavailable
         }
+        try Task.checkCancellation()
+        Logger.log("[MenuBar] click target name=\(latest.displayName) frame=\(latest.frame) display=\(String(describing: targetDisplay))", category: .debug)
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 if button == .left,
-                   latest.windowID == kCGNullWindowID,
                    MenuBarAccessibilityBridge.press(latest) {
+                    Logger.log("[MenuBar] accessibility press succeeded name=\(latest.displayName)", category: .debug)
                     return
                 }
-                try Self.postClick(for: latest, button: button)
+                try Task.checkCancellation()
+                try await Self.postClick(for: latest, button: button)
             }
             group.addTask {
                 // An accessibility press walks the owner's items, each with its
@@ -130,11 +158,12 @@ final class MenuBarItemInteractionService: @unchecked Sendable {
         }
     }
 
-    private static func postClick(
+    @MainActor private static func postClick(
         for item: ManagedMenuBarItem,
         button: CGMouseButton
-    ) throws {
-        guard let source = CGEventSource(stateID: .hidSystemState) else {
+    ) async throws {
+        try Task.checkCancellation()
+        guard let source = CGEventSource(stateID: .privateState) else {
             throw MenuBarItemInteractionError.eventCreationFailed
         }
 
@@ -143,35 +172,39 @@ final class MenuBarItemInteractionService: @unchecked Sendable {
         let downType: CGEventType = button == .right ? .rightMouseDown : .leftMouseDown
         let upType: CGEventType = button == .right ? .rightMouseUp : .leftMouseUp
         guard
-            let mouseDown = makeEvent(
-                type: downType,
-                button: button,
-                point: point,
-                item: item,
-                source: source
-            ),
-            let mouseUp = makeEvent(
-                type: upType,
-                button: button,
-                point: point,
-                item: item,
-                source: source
-            )
+            let mouseDown = CGEvent(mouseEventSource: source, mouseType: downType,
+                mouseCursorPosition: point, mouseButton: button),
+            let mouseUp = CGEvent(mouseEventSource: source, mouseType: upType,
+                mouseCursorPosition: point, mouseButton: button)
         else {
             throw MenuBarItemInteractionError.eventCreationFailed
         }
 
+        var released = false
+        // The notch panel sits above the menu bar and can cover the target icon.
+        let overlays = NSApp.windows.filter { $0 is DynamicIslandWindow && !$0.ignoresMouseEvents }
+        for window in overlays { window.ignoresMouseEvents = true }
         CGDisplayHideCursor(CGMainDisplayID())
         defer {
+            // Always release the injected button, including cancellation.
+            if !released { mouseUp.post(tap: .cgSessionEventTap) }
             if let originalLocation {
                 CGWarpMouseCursorPosition(originalLocation)
             }
             CGDisplayShowCursor(CGMainDisplayID())
+            for window in overlays { window.ignoresMouseEvents = false }
         }
 
+        mouseDown.flags = []
+        mouseUp.flags = []
+        mouseDown.setIntegerValueField(.mouseEventClickState, value: 1)
+        mouseUp.setIntegerValueField(.mouseEventClickState, value: 1)
         mouseDown.post(tap: .cgSessionEventTap)
+        try await Task.sleep(for: .milliseconds(50))
         mouseUp.post(tap: .cgSessionEventTap)
-        Logger.log("[MenuBar] \(button == .right ? "right" : "left") click: \(item.displayName)", category: .debug)
+        released = true
+        try await Task.sleep(for: .milliseconds(50))
+        Logger.log("[MenuBar] \(button == .right ? "right" : "left") click: \(item.displayName) point=\(point) scannedWindow=\(item.windowID)", category: .debug)
     }
 
     private static func makeEvent(
